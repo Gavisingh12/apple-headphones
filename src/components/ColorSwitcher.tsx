@@ -56,7 +56,7 @@ export default function ColorSwitcher() {
                fill
                className="object-contain transition-all duration-1000 ease-in-out mix-blend-screen"
                style={{ filter: activeColor.filter }}
-               priority
+               loading="lazy"
              />
           </div>
 
