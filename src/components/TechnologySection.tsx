@@ -3,7 +3,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import { getFrameLoadProfile, scheduleIdleTask } from "@/lib/performance";
+import {
+  getFrameLoadProfile,
+  runTasksWithConcurrency,
+  scheduleIdleTask,
+} from "@/lib/performance";
 import { withBasePath } from "@/lib/site";
 
 if (typeof window !== "undefined") {
@@ -47,6 +51,7 @@ export default function TechnologySection() {
   const rafRef = useRef<number | null>(null);
   const introTweenRef = useRef<gsap.core.Tween | null>(null);
   const cancelIdleLoadRef = useRef<(() => void) | null>(null);
+  const cueRefs = useRef<Array<HTMLDivElement | null>>([]);
   const loadProfileRef = useRef(getFrameLoadProfile());
   const requestedFrameRef = useRef(0);
   const currentFrameRef = useRef(0);
@@ -55,11 +60,26 @@ export default function TechnologySection() {
     Array.from({ length: techConfig.frameCount }, () => null)
   );
 
-  const [currentFrame, setCurrentFrame] = useState(0);
   const [isReady, setIsReady] = useState(false);
   const [hasPaintedFrame, setHasPaintedFrame] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);
   const loadProfile = loadProfileRef.current;
+
+  const updateCueStyles = useCallback((frame: number) => {
+    cueRefs.current.forEach((element, index) => {
+      const cue = textCues[index];
+
+      if (!element || !cue) {
+        return;
+      }
+
+      const opacity = getCueOpacity(frame, cue.start, cue.end);
+      const translateY = 20 - opacity * 20;
+
+      element.style.opacity = opacity.toFixed(3);
+      element.style.transform = `translateY(calc(-50% + ${translateY}px))`;
+    });
+  }, []);
 
   const drawFrame = useCallback((targetFrame: number) => {
     const canvas = canvasRef.current;
@@ -101,7 +121,7 @@ export default function TechnologySection() {
     
     // Transparent background so we can layer it over CSS gradients
     context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "high";
+    context.imageSmoothingQuality = "medium";
 
     const scale = Math.min(viewportWidth / image.width, viewportHeight / image.height) * 1.0;
     const drawWidth = image.width * scale;
@@ -128,10 +148,14 @@ export default function TechnologySection() {
 
       if (currentFrameRef.current !== nextFrame) {
         currentFrameRef.current = nextFrame;
-        setCurrentFrame(nextFrame);
+        updateCueStyles(nextFrame);
       }
     });
-  }, [drawFrame]);
+  }, [drawFrame, updateCueStyles]);
+
+  useEffect(() => {
+    updateCueStyles(0);
+  }, [updateCueStyles]);
 
   // Load frames dynamically
   useEffect(() => {
@@ -142,6 +166,7 @@ export default function TechnologySection() {
       return new Promise((resolve) => {
         const img = new Image();
         img.decoding = "async";
+        img.fetchPriority = index < loadProfile.preloadInitial ? "high" : "low";
         img.onload = () => {
           if (isAliveRef.current) {
             framesRef.current[index] = img;
@@ -156,11 +181,12 @@ export default function TechnologySection() {
 
     const loadSequence = async () => {
       // Load a smaller initial batch so the page becomes interactive sooner.
+      const initialFrameCount = Math.min(loadProfile.preloadInitial, techConfig.frameCount);
       const initialBatch = Array.from(
-        { length: Math.min(loadProfile.preloadInitial, techConfig.frameCount) },
-        (_, i) => loadFrame(i),
+        { length: initialFrameCount },
+        (_, i) => () => loadFrame(i),
       );
-      await Promise.all(initialBatch);
+      await runTasksWithConcurrency(initialBatch, loadProfile.maxConcurrentLoads);
       if (!isAliveRef.current) return;
       setIsReady(true);
 
@@ -169,19 +195,21 @@ export default function TechnologySection() {
           return;
         }
 
-        cancelIdleLoadRef.current = scheduleIdleTask(async () => {
+        cancelIdleLoadRef.current = scheduleIdleTask(() => {
+          const nextBatchCount = Math.min(loadProfile.batchSize, techConfig.frameCount - start);
           const batch = Array.from(
-            { length: Math.min(loadProfile.batchSize, techConfig.frameCount - start) },
-            (_, offset) => loadFrame(start + offset),
+            { length: nextBatchCount },
+            (_, offset) => () => loadFrame(start + offset),
           );
-          await Promise.all(batch);
 
-          if (!isAliveRef.current) {
-            return;
-          }
+          void runTasksWithConcurrency(batch, loadProfile.maxConcurrentLoads).then(() => {
+            if (!isAliveRef.current) {
+              return;
+            }
 
-          queueRemainingFrames(start + loadProfile.batchSize);
-        });
+            queueRemainingFrames(start + nextBatchCount);
+          });
+        }, 180);
       };
 
       // Lazy load the rest in the background once the page has painted.
@@ -201,7 +229,12 @@ export default function TechnologySection() {
       if (rafRef.current !== null) window.cancelAnimationFrame(rafRef.current);
       motionQuery.removeEventListener("change", motionListener);
     };
-  }, [loadProfile.batchSize, loadProfile.preloadInitial, requestDraw]);
+  }, [
+    loadProfile.batchSize,
+    loadProfile.maxConcurrentLoads,
+    loadProfile.preloadInitial,
+    requestDraw,
+  ]);
 
   useLayoutEffect(() => {
     if (!sectionRef.current || !containerRef.current || reducedMotion || !isReady) return;
@@ -277,18 +310,19 @@ export default function TechnologySection() {
             
             {/* Left aligned text blocks */}
             <div className="flex-1 relative h-64">
-              {textCues.map((cue) => {
-                const opacity = getCueOpacity(currentFrame, cue.start, cue.end);
-                const translateY = 20 - opacity * 20;
-                
+              {textCues.map((cue, index) => {
                 return (
                   <div
                     key={cue.title}
                     className="absolute top-1/2 -translate-y-1/2 left-0 max-w-sm"
+                    ref={(element) => {
+                      cueRefs.current[index] = element;
+                    }}
                     style={{
-                      opacity,
-                      transform: `translate3d(0, ${translateY}px, 0)`,
+                      opacity: 0,
+                      transform: "translateY(calc(-50% + 20px))",
                       transition: "opacity 0.1s ease-out, transform 0.1s ease-out",
+                      willChange: "opacity, transform",
                     }}
                   >
                     <h3 className="text-3xl md:text-5xl font-medium tracking-tight mb-4 text-white drop-shadow-2xl">

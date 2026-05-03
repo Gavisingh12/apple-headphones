@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import DeferredSection from "@/components/DeferredSection";
 import Navbar from "@/components/Navbar";
 
 // Dynamically import the technology sections
@@ -25,19 +26,29 @@ export default function TechnologyPage() {
       <TechnologySection />
 
       {/* 2. The Brain: Audio Processing Chip */}
-      <AudioChipSection />
+      <DeferredSection placeholderClassName="min-h-[880px] border-t border-white/5 bg-[#020202]">
+        <AudioChipSection />
+      </DeferredSection>
 
       {/* 3. ANC Visualizer */}
-      <AncVisualizerSection />
+      <DeferredSection placeholderClassName="min-h-[720px] border-t border-white/5 bg-[#050505]">
+        <AncVisualizerSection />
+      </DeferredSection>
 
       {/* 4. Spatial Audio / 3D Sound Rings */}
-      <SpatialAudioSection />
+      <DeferredSection placeholderClassName="min-h-[900px] border-t border-white/5 bg-[#020202]">
+        <SpatialAudioSection />
+      </DeferredSection>
 
       {/* 5. Craftsmanship & Materials Bento Grid */}
-      <MaterialsBentoGrid />
+      <DeferredSection placeholderClassName="min-h-[1080px] border-t border-white/5 bg-[#050505]">
+        <MaterialsBentoGrid />
+      </DeferredSection>
 
       {/* 6. Battery & Fast Charge */}
-      <BatteryPowerSection />
+      <DeferredSection placeholderClassName="min-h-[720px] border-t border-white/5 bg-[#020202]">
+        <BatteryPowerSection />
+      </DeferredSection>
 
       {/* Outro Banner */}
       <div className="bg-[#020202] py-32 text-center relative z-10">
