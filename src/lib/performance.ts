@@ -72,30 +72,3 @@ export const scheduleIdleTask = (
   const handle = window.setTimeout(callback, delay);
   return () => window.clearTimeout(handle);
 };
-
-export const runTasksWithConcurrency = async (
-  tasks: Array<() => Promise<unknown>>,
-  maxConcurrent = 1,
-): Promise<void> => {
-  if (!tasks.length) {
-    return;
-  }
-
-  let nextTaskIndex = 0;
-  const concurrency = Math.max(1, Math.min(maxConcurrent, tasks.length));
-
-  await Promise.all(
-    Array.from({ length: concurrency }, async () => {
-      while (nextTaskIndex < tasks.length) {
-        const task = tasks[nextTaskIndex];
-        nextTaskIndex += 1;
-
-        if (!task) {
-          return;
-        }
-
-        await task();
-      }
-    }),
-  );
-};
