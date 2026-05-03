@@ -3,18 +3,21 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import { getFrameLoadProfile, scheduleIdleTask } from "@/lib/performance";
 import { withBasePath } from "@/lib/site";
 
 gsap.registerPlugin(ScrollTrigger);
 
 const heroConfig = {
   frameCount: 240,
+  preloadInitial: 48,
+  batchSize: 24,
+  maxConcurrentLoads: 6,
   introEndFrame: 45,
   introDuration: 3.5,
   textFadeFrames: 12,
   overscan: 1.1,
   upwardBias: 0.042,
+  maxDevicePixelRatio: 2,
   frameExtension: "jpg",
 } as const;
 
@@ -72,8 +75,6 @@ export default function CinematicHero() {
   );
   const introTweenRef = useRef<gsap.core.Tween | null>(null);
   const rafRef = useRef<number | null>(null);
-  const cancelIdleLoadRef = useRef<(() => void) | null>(null);
-  const loadProfileRef = useRef(getFrameLoadProfile());
   const requestedFrameRef = useRef(0);
   const currentFrameRef = useRef(0);
   const initialLoadedCountRef = useRef(0);
@@ -91,7 +92,6 @@ export default function CinematicHero() {
   const [isReady, setIsReady] = useState(false);
   const [hasPaintedFrame, setHasPaintedFrame] = useState(false);
 
-  const loadProfile = loadProfileRef.current;
   const firstFrameUrl = getFrameUrl(0);
 
   const cancelIntro = useCallback((animate = true) => {
@@ -152,7 +152,7 @@ export default function CinematicHero() {
     const viewportHeight = window.innerHeight;
     const devicePixelRatio = Math.min(
       window.devicePixelRatio || 1,
-      loadProfile.maxDevicePixelRatio,
+      heroConfig.maxDevicePixelRatio,
     );
     const nextWidth = Math.round(viewportWidth * devicePixelRatio);
     const nextHeight = Math.round(viewportHeight * devicePixelRatio);
@@ -182,7 +182,7 @@ export default function CinematicHero() {
 
     context.drawImage(image, drawX, drawY, drawWidth, drawHeight);
     return true;
-  }, [getNearestLoadedFrame, loadProfile.maxDevicePixelRatio]);
+  }, [getNearestLoadedFrame]);
 
   const requestDraw = useCallback((frame: number) => {
     requestedFrameRef.current = clamp(frame, 0, heroConfig.frameCount - 1);
@@ -240,11 +240,11 @@ export default function CinematicHero() {
           return;
         }
 
-        if (index < loadProfile.preloadInitial) {
+        if (index < heroConfig.preloadInitial) {
           initialLoadedCountRef.current += 1;
           setInitialLoadRatio(
             clamp(
-              initialLoadedCountRef.current / loadProfile.preloadInitial,
+              initialLoadedCountRef.current / heroConfig.preloadInitial,
               0,
               1,
             ),
@@ -268,7 +268,7 @@ export default function CinematicHero() {
     });
 
     return frame.promise;
-  }, [loadProfile.preloadInitial, requestDraw]);
+  }, [requestDraw]);
 
   const loadFrameRange = useCallback(async (start: number, end: number) => {
     const indexes: number[] = [];
@@ -281,7 +281,7 @@ export default function CinematicHero() {
 
     let cursor = 0;
     const workers = Array.from(
-      { length: Math.min(loadProfile.maxConcurrentLoads, indexes.length) },
+      { length: Math.min(heroConfig.maxConcurrentLoads, indexes.length) },
       async () => {
         while (cursor < indexes.length) {
           const frameIndex = indexes[cursor];
@@ -292,7 +292,7 @@ export default function CinematicHero() {
     );
 
     await Promise.all(workers);
-  }, [ensureFrameLoaded, loadProfile.maxConcurrentLoads]);
+  }, [ensureFrameLoaded]);
 
   useEffect(() => {
     isAliveRef.current = true;
@@ -300,7 +300,7 @@ export default function CinematicHero() {
     const loadSequence = async () => {
       // Load the first frame immediately so the canvas paints as quickly as possible.
       void ensureFrameLoaded(0);
-      await loadFrameRange(0, loadProfile.preloadInitial);
+      await loadFrameRange(0, heroConfig.preloadInitial);
 
       if (!isAliveRef.current) {
         return;
@@ -308,27 +308,21 @@ export default function CinematicHero() {
 
       setIsReady(true);
 
-      const queueRemainingFrames = (start: number) => {
-        if (!isAliveRef.current || start >= heroConfig.frameCount) {
+      // Continue loading the remaining frames in steady batches once the intro is ready.
+      for (
+        let start = heroConfig.preloadInitial;
+        start < heroConfig.frameCount;
+        start += heroConfig.batchSize
+      ) {
+        await loadFrameRange(
+          start,
+          Math.min(start + heroConfig.batchSize, heroConfig.frameCount),
+        );
+
+        if (!isAliveRef.current) {
           return;
         }
-
-        cancelIdleLoadRef.current = scheduleIdleTask(async () => {
-          await loadFrameRange(
-            start,
-            Math.min(start + loadProfile.batchSize, heroConfig.frameCount),
-          );
-
-          if (!isAliveRef.current) {
-            return;
-          }
-
-          queueRemainingFrames(start + loadProfile.batchSize);
-        });
-      };
-
-      // Continue loading the remaining frames quietly after the first paint.
-      queueRemainingFrames(loadProfile.preloadInitial);
+      }
     };
 
     void loadSequence();
@@ -340,16 +334,9 @@ export default function CinematicHero() {
         window.cancelAnimationFrame(rafRef.current);
       }
 
-      cancelIdleLoadRef.current?.();
       cancelIntro(false);
     };
-  }, [
-    cancelIntro,
-    ensureFrameLoaded,
-    loadFrameRange,
-    loadProfile.batchSize,
-    loadProfile.preloadInitial,
-  ]);
+  }, [cancelIntro, ensureFrameLoaded, loadFrameRange]);
 
   useEffect(() => {
     const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -366,32 +353,11 @@ export default function CinematicHero() {
     const canvasParallaxElement = canvasParallaxRef.current;
     const textParallaxElement = textParallaxRef.current;
 
-    if (!isReady || !heroElement || !canvasParallaxElement || !textParallaxElement) {
+    if (!heroElement) {
       return () => {
         reducedMotionQuery.removeEventListener("change", syncMotionPreference);
       };
     }
-
-    const canvasXTo = gsap.quickTo(canvasParallaxElement, "x", {
-      duration: 0.9,
-      ease: "power3.out",
-      overwrite: "auto",
-    });
-    const canvasYTo = gsap.quickTo(canvasParallaxElement, "y", {
-      duration: 0.9,
-      ease: "power3.out",
-      overwrite: "auto",
-    });
-    const textXTo = gsap.quickTo(textParallaxElement, "x", {
-      duration: 0.9,
-      ease: "power3.out",
-      overwrite: "auto",
-    });
-    const textYTo = gsap.quickTo(textParallaxElement, "y", {
-      duration: 0.9,
-      ease: "power3.out",
-      overwrite: "auto",
-    });
 
     const handlePointerMove = (event: PointerEvent) => {
       if (reducedMotionRef.current || !finePointerQuery.matches) {
@@ -403,10 +369,21 @@ export default function CinematicHero() {
       const normalizedY = ((event.clientY - bounds.top) / bounds.height - 0.5) * 2;
 
       // Move the canvas and the copy separately so the motion feels layered.
-      canvasXTo(normalizedX * 12);
-      canvasYTo(normalizedY * 12);
-      textXTo(normalizedX * 8);
-      textYTo(normalizedY * 8);
+      gsap.to(canvasParallaxElement, {
+        duration: 0.9,
+        ease: "power3.out",
+        overwrite: "auto",
+        x: normalizedX * 12,
+        y: normalizedY * 12,
+      });
+
+      gsap.to(textParallaxElement, {
+        duration: 0.9,
+        ease: "power3.out",
+        overwrite: "auto",
+        x: normalizedX * 8,
+        y: normalizedY * 8,
+      });
     };
 
     const handlePointerLeave = () => {
@@ -428,10 +405,10 @@ export default function CinematicHero() {
       heroElement.removeEventListener("pointerleave", handlePointerLeave);
       gsap.killTweensOf([canvasParallaxElement, textParallaxElement]);
     };
-  }, [isReady]);
+  }, []);
 
   useLayoutEffect(() => {
-    if (!isReady || !sectionRef.current || !heroRef.current) {
+    if (!sectionRef.current || !heroRef.current) {
       return undefined;
     }
 
@@ -471,7 +448,7 @@ export default function CinematicHero() {
       scrollTriggerRef.current = null;
       context.revert();
     };
-  }, [cancelIntro, isReady, requestDraw]);
+  }, [cancelIntro, requestDraw]);
 
   useEffect(() => {
     if (!isReady) {

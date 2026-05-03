@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import { getFrameLoadProfile, scheduleIdleTask } from "@/lib/performance";
 import { withBasePath } from "@/lib/site";
 
 if (typeof window !== "undefined") {
@@ -12,8 +11,12 @@ if (typeof window !== "undefined") {
 
 const techConfig = {
   frameCount: 240, // Updated to use the full 240 frames provided by the user
+  preloadInitial: 24,
+  batchSize: 24,
+  maxConcurrentLoads: 6,
   overscan: 1.05,
   upwardBias: 0,
+  maxDevicePixelRatio: 2,
   frameExtension: "jpg",
   framePrefix: "frame-", // e.g., frame-001.jpg
   frameFolder: withBasePath("/driver-frames"),
@@ -46,8 +49,6 @@ export default function TechnologySection() {
   const scrollTriggerRef = useRef<ReturnType<typeof ScrollTrigger.create> | null>(null);
   const rafRef = useRef<number | null>(null);
   const introTweenRef = useRef<gsap.core.Tween | null>(null);
-  const cancelIdleLoadRef = useRef<(() => void) | null>(null);
-  const loadProfileRef = useRef(getFrameLoadProfile());
   const requestedFrameRef = useRef(0);
   const currentFrameRef = useRef(0);
   const isAliveRef = useRef(true);
@@ -59,7 +60,6 @@ export default function TechnologySection() {
   const [isReady, setIsReady] = useState(false);
   const [hasPaintedFrame, setHasPaintedFrame] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);
-  const loadProfile = loadProfileRef.current;
 
   const drawFrame = useCallback((targetFrame: number) => {
     const canvas = canvasRef.current;
@@ -87,7 +87,7 @@ export default function TechnologySection() {
 
     const viewportWidth = canvas.clientWidth;
     const viewportHeight = canvas.clientHeight;
-    const dpr = Math.min(window.devicePixelRatio || 1, loadProfile.maxDevicePixelRatio);
+    const dpr = Math.min(window.devicePixelRatio || 1, techConfig.maxDevicePixelRatio);
     const nextWidth = Math.round(viewportWidth * dpr);
     const nextHeight = Math.round(viewportHeight * dpr);
 
@@ -115,7 +115,7 @@ export default function TechnologySection() {
       setHasPaintedFrame(true);
     }
     return true;
-  }, [hasPaintedFrame, loadProfile.maxDevicePixelRatio]);
+  }, [hasPaintedFrame]);
 
   const requestDraw = useCallback((frame: number) => {
     requestedFrameRef.current = clamp(frame, 0, techConfig.frameCount - 1);
@@ -155,37 +155,21 @@ export default function TechnologySection() {
     };
 
     const loadSequence = async () => {
-      // Load a smaller initial batch so the page becomes interactive sooner.
-      const initialBatch = Array.from(
-        { length: Math.min(loadProfile.preloadInitial, techConfig.frameCount) },
-        (_, i) => loadFrame(i),
-      );
+      // Load initial batch aggressively to prevent lag
+      const initialBatch = Array.from({ length: Math.min(techConfig.preloadInitial, techConfig.frameCount) }, (_, i) => loadFrame(i));
       await Promise.all(initialBatch);
       if (!isAliveRef.current) return;
       setIsReady(true);
 
-      const queueRemainingFrames = (start: number) => {
-        if (!isAliveRef.current || start >= techConfig.frameCount) {
-          return;
-        }
-
-        cancelIdleLoadRef.current = scheduleIdleTask(async () => {
-          const batch = Array.from(
-            { length: Math.min(loadProfile.batchSize, techConfig.frameCount - start) },
-            (_, offset) => loadFrame(start + offset),
-          );
-          await Promise.all(batch);
-
-          if (!isAliveRef.current) {
-            return;
-          }
-
-          queueRemainingFrames(start + loadProfile.batchSize);
-        });
-      };
-
-      // Lazy load the rest in the background once the page has painted.
-      queueRemainingFrames(loadProfile.preloadInitial);
+      // Lazy load the rest in background
+      for (let i = techConfig.preloadInitial; i < techConfig.frameCount; i += techConfig.batchSize) {
+        const batch = Array.from(
+          { length: Math.min(techConfig.batchSize, techConfig.frameCount - i) },
+          (_, j) => loadFrame(i + j)
+        );
+        await Promise.all(batch);
+        if (!isAliveRef.current) return;
+      }
     };
 
     void loadSequence();
@@ -197,11 +181,10 @@ export default function TechnologySection() {
 
     return () => {
       isAliveRef.current = false;
-      cancelIdleLoadRef.current?.();
       if (rafRef.current !== null) window.cancelAnimationFrame(rafRef.current);
       motionQuery.removeEventListener("change", motionListener);
     };
-  }, [loadProfile.batchSize, loadProfile.preloadInitial, requestDraw]);
+  }, [requestDraw]);
 
   useLayoutEffect(() => {
     if (!sectionRef.current || !containerRef.current || reducedMotion || !isReady) return;

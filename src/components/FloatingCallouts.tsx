@@ -72,7 +72,7 @@ export default function FloatingCallouts() {
              alt="Apple Exterior Architecture"
              fill
              className="object-contain mix-blend-screen"
-             loading="lazy"
+             priority
            />
         </div>
       </div>
