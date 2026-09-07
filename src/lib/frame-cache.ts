@@ -1,19 +1,39 @@
 type FrameCacheEntry = {
   image: HTMLImageElement | null;
+  lastUsed: number;
   promise?: Promise<HTMLImageElement | null>;
 };
 
 const frameCaches = new Map<string, FrameCacheEntry[]>();
+const maxCachedFramesPerSequence = 96;
 
 const getSequenceCache = (sequence: string, frameCount: number) => {
   let cache = frameCaches.get(sequence);
 
   if (!cache) {
-    cache = Array.from({ length: frameCount }, () => ({ image: null }));
+    cache = Array.from({ length: frameCount }, () => ({
+      image: null,
+      lastUsed: 0,
+    }));
     frameCaches.set(sequence, cache);
   }
 
   return cache;
+};
+
+const trimSequenceCache = (cache: FrameCacheEntry[]) => {
+  const loaded = cache.filter((entry) => entry.image);
+
+  if (loaded.length <= maxCachedFramesPerSequence) {
+    return;
+  }
+
+  loaded
+    .sort((a, b) => a.lastUsed - b.lastUsed)
+    .slice(0, loaded.length - maxCachedFramesPerSequence)
+    .forEach((entry) => {
+      entry.image = null;
+    });
 };
 
 export const loadCachedFrame = (
@@ -23,13 +43,15 @@ export const loadCachedFrame = (
   url: string,
   priority: "high" | "auto" = "auto",
 ) => {
-  const entry = getSequenceCache(sequence, frameCount)[index];
+  const cache = getSequenceCache(sequence, frameCount);
+  const entry = cache[index];
 
   if (!entry) {
     return Promise.resolve(null);
   }
 
   if (entry.image) {
+    entry.lastUsed = Date.now();
     return Promise.resolve(entry.image);
   }
 
@@ -43,7 +65,7 @@ export const loadCachedFrame = (
     image.fetchPriority = priority;
 
     image.onload = async () => {
-      // Keep fully decoded images in memory so scroll scrubbing does not decode them again.
+      // Keep recently used decoded images in memory so scroll scrubbing does not decode them again.
       try {
         await image.decode();
       } catch {
@@ -51,7 +73,9 @@ export const loadCachedFrame = (
       }
 
       entry.image = image;
+      entry.lastUsed = Date.now();
       entry.promise = undefined;
+      trimSequenceCache(cache);
       resolve(image);
     };
 
