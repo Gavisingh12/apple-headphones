@@ -12,18 +12,19 @@ if (typeof window !== "undefined") {
 
 const techConfig = {
   frameCount: 240, // Updated to use the full 240 frames provided by the user
-  preloadInitial: 24,
-  batchSize: 24,
-  maxConcurrentLoads: 6,
+  preloadInitial: 48,
+  maxConcurrentLoads: 4,
   overscan: 1.05,
   upwardBias: 0,
-  maxDevicePixelRatio: 2,
+  maxDevicePixelRatio: 1.5,
   frameExtension: "jpg",
   framePrefix: "frame-", // e.g., frame-001.jpg
   frameFolder: withBasePath("/driver-frames"),
 } as const;
 
 const frameCacheKey = "technology-driver-sequence";
+const frameLookAhead = 18;
+const frameLookBehind = 8;
 
 const textCues = [
   { start: 10, end: 80, title: "Custom Acoustic Core", desc: "Engineered from the ground up for zero distortion." },
@@ -136,42 +137,72 @@ export default function TechnologySection() {
     });
   }, [drawFrame]);
 
+  const loadFrame = useCallback((index: number) => {
+    if (framesRef.current[index]) return Promise.resolve();
+
+    return loadCachedFrame(
+      frameCacheKey,
+      techConfig.frameCount,
+      index,
+      getFrameUrl(index),
+      index === 0 ? "high" : "auto",
+    ).then((image) => {
+      if (image && isAliveRef.current) {
+        framesRef.current[index] = image;
+        if (index === 0) requestDraw(0);
+      }
+    });
+  }, [requestDraw]);
+
+  const loadFrameIndexes = useCallback(async (indexes: number[]) => {
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.min(techConfig.maxConcurrentLoads, indexes.length) },
+      async () => {
+        while (cursor < indexes.length) {
+          const frameIndex = indexes[cursor];
+          cursor += 1;
+          await loadFrame(frameIndex);
+        }
+      },
+    );
+
+    await Promise.all(workers);
+  }, [loadFrame]);
+
+  const warmFramesNear = useCallback((targetFrame: number) => {
+    const indexes = [targetFrame];
+
+    for (let offset = 1; offset <= frameLookAhead; offset += 1) {
+      const nextFrame = targetFrame + offset;
+      if (nextFrame < techConfig.frameCount) {
+        indexes.push(nextFrame);
+      }
+    }
+
+    for (let offset = 1; offset <= frameLookBehind; offset += 1) {
+      const previousFrame = targetFrame - offset;
+      if (previousFrame >= 0) {
+        indexes.push(previousFrame);
+      }
+    }
+
+    void loadFrameIndexes(indexes);
+  }, [loadFrameIndexes]);
+
   // Load frames dynamically
   useEffect(() => {
     isAliveRef.current = true;
-    
-    const loadFrame = (index: number): Promise<void> => {
-      if (framesRef.current[index]) return Promise.resolve();
-      return loadCachedFrame(
-        frameCacheKey,
-        techConfig.frameCount,
-        index,
-        getFrameUrl(index),
-        index === 0 ? "high" : "auto",
-      ).then((image) => {
-        if (image && isAliveRef.current) {
-          framesRef.current[index] = image;
-          if (index === 0) requestDraw(0);
-        }
-      });
-    };
 
     const loadSequence = async () => {
-      // Load initial batch aggressively to prevent lag
-      const initialBatch = Array.from({ length: Math.min(techConfig.preloadInitial, techConfig.frameCount) }, (_, i) => loadFrame(i));
-      await Promise.all(initialBatch);
+      const initialIndexes = Array.from(
+        { length: Math.min(techConfig.preloadInitial, techConfig.frameCount) },
+        (_, index) => index,
+      );
+      await loadFrameIndexes(initialIndexes);
       if (!isAliveRef.current) return;
       setIsReady(true);
-
-      // Lazy load the rest in background
-      for (let i = techConfig.preloadInitial; i < techConfig.frameCount; i += techConfig.batchSize) {
-        const batch = Array.from(
-          { length: Math.min(techConfig.batchSize, techConfig.frameCount - i) },
-          (_, j) => loadFrame(i + j)
-        );
-        await Promise.all(batch);
-        if (!isAliveRef.current) return;
-      }
+      warmFramesNear(45);
     };
 
     void loadSequence();
@@ -186,7 +217,7 @@ export default function TechnologySection() {
       if (rafRef.current !== null) window.cancelAnimationFrame(rafRef.current);
       motionQuery.removeEventListener("change", motionListener);
     };
-  }, [requestDraw]);
+  }, [loadFrameIndexes, warmFramesNear]);
 
   useLayoutEffect(() => {
     if (!sectionRef.current || !containerRef.current || reducedMotion || !isReady) return;
@@ -198,7 +229,11 @@ export default function TechnologySection() {
         duration: 3,
         ease: "power2.inOut",
         frame: 45, // Smoothly animate first 45 frames automatically
-        onUpdate: () => requestDraw(Math.round(introPlayhead.frame)),
+        onUpdate: () => {
+          const nextFrame = Math.round(introPlayhead.frame);
+          warmFramesNear(nextFrame);
+          requestDraw(nextFrame);
+        },
         snap: { frame: 1 },
       });
 
@@ -219,6 +254,7 @@ export default function TechnologySection() {
             Math.round(introPlayhead.frame), 
             Math.floor(self.progress * (techConfig.frameCount - 1))
           );
+          warmFramesNear(nextFrame);
           requestDraw(nextFrame);
         },
       });
@@ -229,7 +265,7 @@ export default function TechnologySection() {
       introTweenRef.current?.kill();
       ctx.revert();
     };
-  }, [reducedMotion, requestDraw, isReady]);
+  }, [reducedMotion, requestDraw, isReady, warmFramesNear]);
 
   return (
     <section ref={sectionRef} className="relative bg-black text-white">

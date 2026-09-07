@@ -12,17 +12,19 @@ const heroConfig = {
   frameCount: 240,
   preloadInitial: 48,
   batchSize: 24,
-  maxConcurrentLoads: 6,
+  maxConcurrentLoads: 4,
   introEndFrame: 45,
   introDuration: 3.5,
   textFadeFrames: 12,
   overscan: 1.1,
   upwardBias: 0.042,
-  maxDevicePixelRatio: 2,
+  maxDevicePixelRatio: 1.5,
   frameExtension: "jpg",
 } as const;
 
 const frameCacheKey = "hero-sequence";
+const frameLookAhead = 18;
+const frameLookBehind = 8;
 
 const textCues = [
   { start: 0, end: 85, label: "Immersive Sound" },
@@ -264,21 +266,17 @@ export default function CinematicHero() {
     return frame.promise;
   }, [requestDraw]);
 
-  const loadFrameRange = useCallback(async (start: number, end: number) => {
-    const indexes: number[] = [];
-
-    for (let index = start; index < end; index += 1) {
-      if (framesRef.current[index]?.status !== "loaded") {
-        indexes.push(index);
-      }
-    }
+  const loadFrameIndexes = useCallback(async (indexes: number[]) => {
+    const pendingIndexes = indexes.filter(
+      (index) => framesRef.current[index]?.status !== "loaded",
+    );
 
     let cursor = 0;
     const workers = Array.from(
-      { length: Math.min(heroConfig.maxConcurrentLoads, indexes.length) },
+      { length: Math.min(heroConfig.maxConcurrentLoads, pendingIndexes.length) },
       async () => {
-        while (cursor < indexes.length) {
-          const frameIndex = indexes[cursor];
+        while (cursor < pendingIndexes.length) {
+          const frameIndex = pendingIndexes[cursor];
           cursor += 1;
           await ensureFrameLoaded(frameIndex);
         }
@@ -287,6 +285,31 @@ export default function CinematicHero() {
 
     await Promise.all(workers);
   }, [ensureFrameLoaded]);
+
+  const loadFrameRange = useCallback((start: number, end: number) =>
+    loadFrameIndexes(
+      Array.from({ length: Math.max(end - start, 0) }, (_, index) => start + index),
+    ), [loadFrameIndexes]);
+
+  const warmFramesNear = useCallback((targetFrame: number) => {
+    const indexes = [targetFrame];
+
+    for (let offset = 1; offset <= frameLookAhead; offset += 1) {
+      const nextFrame = targetFrame + offset;
+      if (nextFrame < heroConfig.frameCount) {
+        indexes.push(nextFrame);
+      }
+    }
+
+    for (let offset = 1; offset <= frameLookBehind; offset += 1) {
+      const previousFrame = targetFrame - offset;
+      if (previousFrame >= 0) {
+        indexes.push(previousFrame);
+      }
+    }
+
+    void loadFrameIndexes(indexes);
+  }, [loadFrameIndexes]);
 
   useEffect(() => {
     isAliveRef.current = true;
@@ -302,21 +325,8 @@ export default function CinematicHero() {
 
       setIsReady(true);
 
-      // Continue loading the remaining frames in steady batches once the intro is ready.
-      for (
-        let start = heroConfig.preloadInitial;
-        start < heroConfig.frameCount;
-        start += heroConfig.batchSize
-      ) {
-        await loadFrameRange(
-          start,
-          Math.min(start + heroConfig.batchSize, heroConfig.frameCount),
-        );
-
-        if (!isAliveRef.current) {
-          return;
-        }
-      }
+      // Further frames are requested near the current scroll position, not all at once.
+      warmFramesNear(heroConfig.introEndFrame);
     };
 
     void loadSequence();
@@ -330,7 +340,7 @@ export default function CinematicHero() {
 
       cancelIntro(false);
     };
-  }, [cancelIntro, ensureFrameLoaded, loadFrameRange]);
+  }, [cancelIntro, ensureFrameLoaded, loadFrameRange, warmFramesNear]);
 
   useEffect(() => {
     const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -419,6 +429,7 @@ export default function CinematicHero() {
           }
 
           const nextFrame = Math.floor(self.progress * (heroConfig.frameCount - 1));
+          warmFramesNear(nextFrame);
           requestDraw(nextFrame);
         },
         pin: heroRef.current,
@@ -442,7 +453,7 @@ export default function CinematicHero() {
       scrollTriggerRef.current = null;
       context.revert();
     };
-  }, [cancelIntro, requestDraw]);
+  }, [cancelIntro, requestDraw, warmFramesNear]);
 
   useEffect(() => {
     if (!isReady) {
@@ -468,12 +479,16 @@ export default function CinematicHero() {
       duration: heroConfig.introDuration,
       ease: "power2.out",
       frame: heroConfig.introEndFrame,
-      onUpdate: () => requestDraw(Math.round(introPlayhead.frame)),
+      onUpdate: () => {
+        const nextFrame = Math.round(introPlayhead.frame);
+        warmFramesNear(nextFrame);
+        requestDraw(nextFrame);
+      },
       snap: { frame: 1 },
     });
 
     ScrollTrigger.refresh();
-  }, [isReady, requestDraw]);
+  }, [isReady, requestDraw, warmFramesNear]);
 
   const loadingPercent = Math.round(initialLoadRatio * 100);
   const scrollHintOpacity = clamp(1 - currentFrame / 18, 0, 1);
