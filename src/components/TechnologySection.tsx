@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import { loadCachedFrame } from "@/lib/frame-cache";
 import { withBasePath } from "@/lib/site";
 
 if (typeof window !== "undefined") {
@@ -21,6 +22,8 @@ const techConfig = {
   framePrefix: "frame-", // e.g., frame-001.jpg
   frameFolder: withBasePath("/driver-frames"),
 } as const;
+
+const frameCacheKey = "technology-driver-sequence";
 
 const textCues = [
   { start: 10, end: 80, title: "Custom Acoustic Core", desc: "Engineered from the ground up for zero distortion." },
@@ -139,18 +142,17 @@ export default function TechnologySection() {
     
     const loadFrame = (index: number): Promise<void> => {
       if (framesRef.current[index]) return Promise.resolve();
-      return new Promise((resolve) => {
-        const img = new Image();
-        img.decoding = "async";
-        img.onload = () => {
-          if (isAliveRef.current) {
-            framesRef.current[index] = img;
-            if (index === 0) requestDraw(0);
-          }
-          resolve();
-        };
-        img.onerror = () => resolve(); // Gracefully handle missing frames
-        img.src = getFrameUrl(index);
+      return loadCachedFrame(
+        frameCacheKey,
+        techConfig.frameCount,
+        index,
+        getFrameUrl(index),
+        index === 0 ? "high" : "auto",
+      ).then((image) => {
+        if (image && isAliveRef.current) {
+          framesRef.current[index] = image;
+          if (index === 0) requestDraw(0);
+        }
       });
     };
 

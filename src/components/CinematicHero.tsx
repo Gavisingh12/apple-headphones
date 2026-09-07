@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import { loadCachedFrame } from "@/lib/frame-cache";
 import { withBasePath } from "@/lib/site";
 
 gsap.registerPlugin(ScrollTrigger);
@@ -20,6 +21,8 @@ const heroConfig = {
   maxDevicePixelRatio: 2,
   frameExtension: "jpg",
 } as const;
+
+const frameCacheKey = "hero-sequence";
 
 const textCues = [
   { start: 0, end: 85, label: "Immersive Sound" },
@@ -225,46 +228,37 @@ export default function CinematicHero() {
     }
 
     frame.status = "loading";
-    frame.promise = new Promise<HTMLImageElement | null>((resolve) => {
-      const image = new Image();
-      image.decoding = "async";
-      image.fetchPriority = index === 0 ? "high" : "auto";
+    frame.promise = loadCachedFrame(
+      frameCacheKey,
+      heroConfig.frameCount,
+      index,
+      getFrameUrl(index),
+      index === 0 ? "high" : "auto",
+    ).then((image) => {
+      frame.promise = undefined;
+      frame.image = image;
+      frame.status = image ? "loaded" : "error";
 
-      image.onload = () => {
-        frame.image = image;
-        frame.promise = undefined;
-        frame.status = "loaded";
+      if (!image || !isAliveRef.current) {
+        return image;
+      }
 
-        if (!isAliveRef.current) {
-          resolve(image);
-          return;
-        }
+      if (index < heroConfig.preloadInitial) {
+        initialLoadedCountRef.current += 1;
+        setInitialLoadRatio(
+          clamp(
+            initialLoadedCountRef.current / heroConfig.preloadInitial,
+            0,
+            1,
+          ),
+        );
+      }
 
-        if (index < heroConfig.preloadInitial) {
-          initialLoadedCountRef.current += 1;
-          setInitialLoadRatio(
-            clamp(
-              initialLoadedCountRef.current / heroConfig.preloadInitial,
-              0,
-              1,
-            ),
-          );
-        }
+      if (index === 0) {
+        requestDraw(0);
+      }
 
-        if (index === 0) {
-          requestDraw(0);
-        }
-
-        resolve(image);
-      };
-
-      image.onerror = () => {
-        frame.promise = undefined;
-        frame.status = "error";
-        resolve(null);
-      };
-
-      image.src = getFrameUrl(index);
+      return image;
     });
 
     return frame.promise;
